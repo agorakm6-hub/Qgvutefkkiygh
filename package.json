@@ -1,13 +1,13 @@
 {
   "name": "crown-casino-bot",
   "version": "1.0.0",
-  "description": "Crown Casino: Telegram Mini App + бот с оплатой Telegram Stars",
+  "description": "Crown Casino — Telegram Mini App казино (виртуальная валюта), бот и сервер",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "node-telegram-bot-api": "^0.66.0"
