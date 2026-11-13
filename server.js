@@ -908,6 +908,11 @@ bot.on('callback_query', async (cb) => {
     } catch (e) { console.error('callback_query (setlang) error:', e.message); }
 });
 
+// ====== Игры в групповых чатах (ставка 100 / /bet 100 / вб / игры / рейк) ======
+// Кнопки работают только у того, кто написал команду. Баланс общий с Mini App
+// (списания и выигрыши идут через queueWallet). Настройки — в groupgames.js (CFG).
+require('./groupgames')({ bot, spendableBalance, queueWallet, isAccountFrozen, isAdminId, parseAmount, rememberUser, escapeHtml });
+
 // ====== Инлайн-режим: "send 500" / "receive 500" (переводы зиксов) ======
 // Форматы запроса: "send 500", "receive 500", необязательно с указанием
 // получателя впереди — "@username send 500" (используется только как
