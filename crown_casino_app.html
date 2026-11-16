@@ -4001,12 +4001,13 @@ function endMinesRound(){
   const birdImg = new Image();
   birdImg.src = 'data:image/svg+xml;base64,' + btoa(birdSvg);
 
-  const SLOW = 2.5;                                // игра замедлена в 2.5 раза (всё по времени: падение, трубы, взмах)
-  const GRAVITY = 0.6 / 1.3 * 1.5 / (SLOW * SLOW);
+  const SPEED = 0.8;                               // общая скорость игры (1 = старая версия на 60 Гц). Одинакова на любом экране: физика идёт фикс-шагом 60 раз/сек
+  const STEP_MS = 1000 / 60;
+  const GRAVITY = 0.6 / 1.3 * 1.5 * SPEED * SPEED;
   const FLAP_VELOCITY = -Math.sqrt(2 * GRAVITY * 70.5); // высота одного прыжка остаётся прежней (≈70 px)
   const PIPE_WIDTH = 70;
-  const PIPE_GAP = 175;
-  const PIPE_SPEED = 2.8 / SLOW;
+  const PIPE_GAP = 165;
+  const PIPE_SPEED = 2.8 * SPEED;
   const BIRD_SIZE = 34;
   const BS = 1.5;            // масштаб птицы
   const HIT = 18;            // половина хитбокса
@@ -4091,7 +4092,7 @@ function endMinesRound(){
     if(state.graphics !== 'low'){
       const n = state.graphics === 'high' ? 4 : 2;
       for(let i = 0; i < n; i++){
-        const cx = ((frame * 0.3 / SLOW + i * 120) % (W + 90)) - 60, cy = 40 + i * 52;
+        const cx = ((frame * 0.3 * SPEED + i * 120) % (W + 90)) - 60, cy = 40 + i * 52;
         px(ctx, cx + 8, cy, 34, 10, '#fff'); px(ctx, cx, cy + 8, 52, 12, '#fff'); px(ctx, cx + 16, cy - 8, 20, 10, '#fff');
       }
     }
@@ -4148,7 +4149,7 @@ function endMinesRound(){
     ctx.scale(BS, BS);
     ctx.drawImage(birdSprite, -17, -12);
     // крыло машет: вверх / середина / вниз
-    const ph = Math.floor(frame / (4 * SLOW)) % 4, wy = [3, 5, 7, 5][ph];
+    const ph = Math.floor(frame * SPEED / 4) % 4, wy = [3, 5, 7, 5][ph];
     px(ctx, -16, -12 + wy * 2 - 2, 12, 8, C.out);
     px(ctx, -14, -12 + wy * 2, 8, 4, '#fffdf0');
     px(ctx, -14, -12 + wy * 2 + 4, 8, 2, '#e8e0c0');
@@ -4159,9 +4160,9 @@ function endMinesRound(){
     frame++;
     bird.vy += GRAVITY;
     bird.y += bird.vy;
-    bird.rotation = Math.max(-0.5, Math.min(1.2, bird.vy*SLOW/10));
+    bird.rotation = Math.max(-0.5, Math.min(1.2, bird.vy/(10 * SPEED)));
 
-    if(frame % Math.round(90 * SLOW) === 0) spawnPipe();
+    if(frame % Math.round(90 / SPEED) === 0) spawnPipe();
     pipes.forEach(p=> p.x -= PIPE_SPEED);
     pipes = pipes.filter(p=> p.x > -PIPE_WIDTH);
 
@@ -4211,9 +4212,17 @@ function endMinesRound(){
     cancelAnimationFrame(rafId);
   }
 
-  function loop(){
+  // Фикс-шаг: на 60/90/120/144 Гц и в любом клиенте (Telegram, AyuGram, Desktop) скорость игры одинаковая
+  let lastT = 0, acc = 0;
+  function steps(ts, fn){
+    if(!lastT) lastT = ts;
+    acc += Math.min(100, ts - lastT); lastT = ts;
+    while(acc >= STEP_MS){ acc -= STEP_MS; fn(); if(gstate !== 'playing' && gstate !== 'ready') return false; }
+    return true;
+  }
+  function loop(ts){
     if(gstate !== 'playing') return;
-    update();
+    if(!steps(ts || performance.now(), update)) return;
     drawBackground();
     drawPipes();
     drawGround();
@@ -4227,10 +4236,10 @@ function endMinesRound(){
     return `<button class="fl-play" id="flPlayBtn" aria-label="Play">${PLAY_BTN_SVG}</button><div class="fl-hint">${tr('tap_to_flap')}</div>`;
   }
   // Ожидание старта: птица парит, по центру большая кнопка «играть» (как в оригинале)
-  function readyLoop(){
+  function readyLoop(ts){
     if(gstate !== 'ready') return;
-    frame++;
-    bird.y = H/2 + Math.sin(frame/(12 * SLOW)) * 7;
+    steps(ts || performance.now(), ()=>{ frame++; });
+    bird.y = H/2 + Math.sin(frame * SPEED / 12) * 7;
     bird.rotation = 0;
     drawBackground(); drawGround(); drawBird();
     rafId = requestAnimationFrame(readyLoop);
@@ -4240,7 +4249,7 @@ function endMinesRound(){
     cancelAnimationFrame(rafId);
     gstate = 'playing';
     if(overlay) overlay.style.display = 'none';
-    frame = 0; pipes = [];
+    frame = 0; pipes = []; lastT = 0; acc = 0;
     bird.y = H/2; bird.vy = FLAP_VELOCITY; bird.rotation = 0;
     spawnPipe();
     sfx('flap');
@@ -4268,7 +4277,7 @@ function endMinesRound(){
     fitStage();
     reset();
     if(overlay){ overlay.className = 'flappy-overlay ready'; overlay.innerHTML = readyOverlayHtml(); overlay.style.display = 'flex'; }
-    readyLoop();
+    lastT = 0; acc = 0; readyLoop();
   });
 
   function flap(){
