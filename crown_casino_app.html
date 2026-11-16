@@ -4001,11 +4001,12 @@ function endMinesRound(){
   const birdImg = new Image();
   birdImg.src = 'data:image/svg+xml;base64,' + btoa(birdSvg);
 
-  const GRAVITY = 0.6 / 1.3 * 1.5;                // падение в 1.5 раза быстрее, чем в прошлой версии
+  const SLOW = 2.5;                                // игра замедлена в 2.5 раза (всё по времени: падение, трубы, взмах)
+  const GRAVITY = 0.6 / 1.3 * 1.5 / (SLOW * SLOW);
   const FLAP_VELOCITY = -Math.sqrt(2 * GRAVITY * 70.5); // высота одного прыжка остаётся прежней (≈70 px)
   const PIPE_WIDTH = 70;
   const PIPE_GAP = 175;
-  const PIPE_SPEED = 2.8;
+  const PIPE_SPEED = 2.8 / SLOW;
   const BIRD_SIZE = 34;
   const BS = 1.5;            // масштаб птицы
   const HIT = 18;            // половина хитбокса
@@ -4090,7 +4091,7 @@ function endMinesRound(){
     if(state.graphics !== 'low'){
       const n = state.graphics === 'high' ? 4 : 2;
       for(let i = 0; i < n; i++){
-        const cx = ((frame * 0.3 + i * 120) % (W + 90)) - 60, cy = 40 + i * 52;
+        const cx = ((frame * 0.3 / SLOW + i * 120) % (W + 90)) - 60, cy = 40 + i * 52;
         px(ctx, cx + 8, cy, 34, 10, '#fff'); px(ctx, cx, cy + 8, 52, 12, '#fff'); px(ctx, cx + 16, cy - 8, 20, 10, '#fff');
       }
     }
@@ -4147,7 +4148,7 @@ function endMinesRound(){
     ctx.scale(BS, BS);
     ctx.drawImage(birdSprite, -17, -12);
     // крыло машет: вверх / середина / вниз
-    const ph = Math.floor(frame / 4) % 4, wy = [3, 5, 7, 5][ph];
+    const ph = Math.floor(frame / (4 * SLOW)) % 4, wy = [3, 5, 7, 5][ph];
     px(ctx, -16, -12 + wy * 2 - 2, 12, 8, C.out);
     px(ctx, -14, -12 + wy * 2, 8, 4, '#fffdf0');
     px(ctx, -14, -12 + wy * 2 + 4, 8, 2, '#e8e0c0');
@@ -4158,9 +4159,9 @@ function endMinesRound(){
     frame++;
     bird.vy += GRAVITY;
     bird.y += bird.vy;
-    bird.rotation = Math.max(-0.5, Math.min(1.2, bird.vy/10));
+    bird.rotation = Math.max(-0.5, Math.min(1.2, bird.vy*SLOW/10));
 
-    if(frame % 90 === 0) spawnPipe();
+    if(frame % Math.round(90 * SLOW) === 0) spawnPipe();
     pipes.forEach(p=> p.x -= PIPE_SPEED);
     pipes = pipes.filter(p=> p.x > -PIPE_WIDTH);
 
@@ -4229,7 +4230,7 @@ function endMinesRound(){
   function readyLoop(){
     if(gstate !== 'ready') return;
     frame++;
-    bird.y = H/2 + Math.sin(frame/12) * 7;
+    bird.y = H/2 + Math.sin(frame/(12 * SLOW)) * 7;
     bird.rotation = 0;
     drawBackground(); drawGround(); drawBird();
     rafId = requestAnimationFrame(readyLoop);

@@ -104,9 +104,18 @@ function setUserLanguage(userId, lang) {
 // языка в памяти (renderedAppCache) — запрос отдаёт уже готовую строку, без
 // какой-либо работы по переводу на лету.
 function loadLangDict(lang) {
-    const file = path.join(LANG_DICT_DIR, `${lang}.json`);
-    try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-    catch (e) { console.error(`❌ Не удалось прочитать словарь языка ${lang}:`, e.message); return {}; }
+    // Читаем и lang/<код>.json (старая раскладка), и <код>.json рядом с server.js (плоская). Корень главнее:
+    // так старая папка lang/ в репозитории не перебивает свежие переводы.
+    const files = [path.join(__dirname, 'lang', `${lang}.json`), path.join(__dirname, `${lang}.json`)];
+    const dict = {};
+    let loaded = 0;
+    for (const file of files) {
+        if (!fs.existsSync(file)) continue;
+        try { Object.assign(dict, JSON.parse(fs.readFileSync(file, 'utf8'))); loaded++; }
+        catch (e) { console.error(`❌ Не удалось прочитать словарь ${file}:`, e.message); }
+    }
+    if (!loaded) console.error(`❌ Словарь языка ${lang} не найден (ищу ${files.join(' и ')})`);
+    return dict;
 }
 function escapeHtml(s) {
     return String(s)
