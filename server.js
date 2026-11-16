@@ -582,6 +582,7 @@ function runLeaderboardCycleIfDue() {
 const USERS_FILE = path.join(__dirname, 'users.json');
 let usersCache = null;
 let usersSaveTimer = null;
+let profilesApi = null;     // инициализируется ниже (profiles.js)
 function loadUsers() {
     if (usersCache) return usersCache;
     try { usersCache = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch (e) { usersCache = {}; }
@@ -594,6 +595,7 @@ function touchUser(u) {
         const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || (u.username ? '@' + u.username : 'Игрок');
         const prev = all[k];
         all[k] = { name, username: u.username || '', seen: Date.now() };
+        if (!prev && profilesApi) { const total = Object.keys(all).length; setImmediate(() => profilesApi.onNewUser(k, total)); }
         if (!prev || prev.name !== name || prev.username !== (u.username || '') || Date.now() - (prev.seen || 0) > 60000) {
             if (!usersSaveTimer) usersSaveTimer = setTimeout(() => {
                 usersSaveTimer = null;
@@ -911,7 +913,11 @@ bot.on('callback_query', async (cb) => {
 // ====== Игры в групповых чатах (ставка 100 / /bet 100 / вб / игры / рейк) ======
 // Кнопки работают только у того, кто написал команду. Баланс общий с Mini App
 // (списания и выигрыши идут через queueWallet). Настройки — в groupgames.js (CFG).
-require('./groupgames')({ bot, spendableBalance, queueWallet, isAccountFrozen, isAdminId, parseAmount, rememberUser, escapeHtml });
+const groupGamesApi = require('./groupgames')({
+    bot, spendableBalance, queueWallet, isAccountFrozen, isAdminId, parseAmount, rememberUser, escapeHtml,
+    onGroupGame: (uid, g) => { if (profilesApi) profilesApi.recordGroupGame(uid, g); },   // проверенная статистика
+    badgeOf: (uid) => (profilesApi ? profilesApi.badgeOf(uid) : ''),                    // значок монеты Genesis у ника
+});
 
 // ====== Инлайн-режим: "send 500" / "receive 500" (переводы зиксов) ======
 // Форматы запроса: "send 500", "receive 500", необязательно с указанием
@@ -953,6 +959,7 @@ bot.on('inline_query', async (q) => {
         if (q.from && !isAdminId(q.from.id) && isAccountFrozen(q.from.id)) return; // полностью игнорируем
         rememberUser(q.from);
         const text = (q.query || '').trim();
+        if (profilesApi && /^(profile|профиль|profil)$/i.test(text)) { await profilesApi.answerInline(q); return; }   // карточка профиля картинкой
         const m = text.match(INLINE_CMD_RE);
         if (!m || !MINI_APP_SHORT_NAME || !BOT_USERNAME) {
             await bot.answerInlineQuery(q.id, [], { cache_time: 0, is_personal: true });
@@ -1046,6 +1053,48 @@ function readBody(req, maxBytes, cb) {
     });
 }
 
+// ====== Профили, монета Genesis, рейтинги (profiles.js) и админ-команда /db (dbbackup.js) ======
+profilesApi = require('./profiles')({
+    bot, validateInitData, readBody, sendJson, MAX_API_BODY_BYTES, loadUsers, isAdminId, isHidden, isAccountFrozen, getUserLanguage,
+    ADMIN_ID: ADMIN_TELEGRAM_ID, escapeHtml,
+    getBaseUrl: () => EXTERNAL_URL, getBotUsername: () => BOT_USERNAME, getMiniAppShort: () => MINI_APP_SHORT_NAME,
+    knownBalance: (uid) => { const r = loadBalances()[String(uid)]; return r ? r.coins : null; },
+});
+// Все файлы данных, которые попадают в /db. После восстановления кэши в памяти сбрасываем.
+const DB_FILES = ['premium.json', 'languages.json', 'transfers.json', 'wallet-pending.json', 'usernames.json', 'balances.json', 'payments.json',
+    'refunds.json', 'points.json', 'crypto_game.json', 'crypto_positions.json', 'rocket_history.json', 'leaderboard_state.json', 'users.json',
+    'bank.json', 'profiles.json', 'groupgames.json'];
+function resetAllCaches() {
+    [balancesSaveTimer, cryptoPosTimer, usersSaveTimer].forEach((t) => { if (t) clearTimeout(t); });
+    balancesSaveTimer = null; cryptoPosTimer = null; usersSaveTimer = null;
+    usernamesCache = null; balancesCache = null; cryptoCache = null; cryptoPosCache = null; usersCache = null; bankCache = null;
+    liqCache = { v: 2.5e9, ts: 0 };
+    if (profilesApi) profilesApi.reload();
+    if (groupGamesApi) groupGamesApi.reload();
+}
+require('./dbbackup')({ bot, isAdminId, https, files: DB_FILES, dir: __dirname, resetCaches: resetAllCaches });
+
+// ====== Звуки: mp3/ogg/wav/m4a/webm лежат рядом с server.js (или в папке sounds/, если она есть). Имена: <игра>_<событие>[_N].ext — см. SOUNDS_README.txt ======
+const SOUNDS_DIR = fs.existsSync(path.join(__dirname, 'sounds')) ? path.join(__dirname, 'sounds') : __dirname;
+const SOUND_MIME = { mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4', webm: 'audio/webm' };
+function handleSoundRoutes(req, res) {
+    if (req.method !== 'GET') return false;
+    if (req.url === '/api/sounds-list') {
+        let files = [];
+        try { files = fs.readdirSync(SOUNDS_DIR).filter((n) => /^[A-Za-z0-9_-]+\.(mp3|ogg|wav|m4a|webm)$/i.test(n)); } catch (e) { /* папки ещё нет */ }
+        sendJson(res, 200, { files });
+        return true;
+    }
+    const m = req.url.match(/^\/sounds\/([A-Za-z0-9_-]+\.(mp3|ogg|wav|m4a|webm))$/i);
+    if (!m) return false;
+    fs.readFile(path.join(SOUNDS_DIR, m[1]), (err, buf) => {
+        if (err) { res.writeHead(404); res.end(); return; }
+        res.writeHead(200, { 'Content-Type': SOUND_MIME[m[2].toLowerCase()], 'Cache-Control': 'public, max-age=86400', 'Content-Length': buf.length });
+        res.end(buf);
+    });
+    return true;
+}
+
 const server = http.createServer((req, res) => {
     // Telegram добавляет ?tgWebAppStartParam=... — отрезаем query, чтобы маршруты совпадали
     req.url = req.url.split('?')[0];
@@ -1066,6 +1115,8 @@ const server = http.createServer((req, res) => {
     }
 
     if (handleBankRoutes(req, res)) return;
+    if (profilesApi && profilesApi.handleRoutes(req, res)) return;   // /api/profile*, /pc/<id>-<ver>.png
+    if (handleSoundRoutes(req, res)) return;
 
     // ---- Начисление очков лидерборда за выигрыш в игре ----
     if (req.method === 'POST' && req.url === '/api/add-points') {

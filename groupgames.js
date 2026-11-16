@@ -26,7 +26,7 @@ const crypto = require('crypto');
 
 // ---------------- НАСТРОЙКИ (меняй здесь) ----------------
 const CFG = {
-    CUR: '💲',                 // знак валюты в сообщениях
+    CUR: '🪙',                 // знак валюты в сообщениях
     HOUSE_EDGE: 0.03,          // выплата = ставка × множитель × (1 − HOUSE_EDGE)
     RAKE_RATE: 0.005,          // рейкбек: доля от суммы ставок
     DEFAULT_BET: 10,
@@ -139,6 +139,22 @@ function fmtMult(x) {
     if (x >= 1000) return String(Math.floor(x));
     return String(Math.floor(x * 100 + 1e-9) / 100);
 }
+// Unicode-жирный шрифт для латиницы и цифр (кириллицу Unicode так не умеет — для неё <b>, <i>, <code>, <blockquote>)
+function ub(s) {
+    return String(s).replace(/[A-Za-z0-9]/g, (c) => {
+        const k = c.charCodeAt(0);
+        if (k >= 48 && k <= 57) return String.fromCodePoint(0x1D7EC + k - 48);
+        if (k >= 65 && k <= 90) return String.fromCodePoint(0x1D5D4 + k - 65);
+        return String.fromCodePoint(0x1D5EE + k - 97);
+    });
+}
+const coin = (n) => `${ub(fmtShort(n))} ${CFG.CUR}`;
+const xm = (m) => `×${ub(fmtMult(m))}`;
+function needText(g, oc) {
+    if (g.emoji === '🎰' || oc.set.length > 6) return oc.t;
+    const a = oc.set.slice(); const last = a.pop();
+    return a.length ? a.join(', ') + ' или ' + last : String(last);
+}
 const outcomeMult = (game, oc, n) => Math.pow(game.values / oc.set.length, n);
 const throwsMax = (game) => (game.emoji === '🎲' ? CFG.MAX_THROWS_DICE : CFG.MAX_THROWS_OTHER);
 const payoutFor = (stake, mult) => Math.floor(stake * mult * (1 - CFG.HOUSE_EDGE) + 1e-9);
@@ -166,11 +182,12 @@ module.exports = function initGroupGames(deps) {
 
     // ---- вспомогательное ----
     const nameOf = (u) => esc(u.first_name || (u.username ? '@' + u.username : 'Игрок'));
-    const mention = (u) => (u.username ? '@' + esc(u.username) : `<a href="tg://user?id=${u.id}">${nameOf(u)}</a>`);
+    const badge = (u) => { try { return deps.badgeOf ? deps.badgeOf(u.id) : ''; } catch (e) { return ''; } };   // значок монеты Genesis
+    const mention = (u) => (u.username ? '@' + esc(u.username) : `<a href="tg://user?id=${u.id}">${nameOf(u)}</a>`) + badge(u);
     function balanceOf(uid) { const b = spendableBalance(uid); return b === null ? null : b; }
-    function footer(uid) {
+    function footer(uid, next) {
         const b = balanceOf(uid);
-        return `➕ Ставка: ${fmtShort(rec(uid).bet)} ${CFG.CUR}\n💰 Баланс: ${fmtShort(b || 0)} ${CFG.CUR}`;
+        return `<blockquote>🎟 ${next ? 'Следующая ставка' : 'Ставка'}: <b>${coin(rec(uid).bet)}</b>\n👛 Баланс: <b>${coin(b || 0)}</b></blockquote>`;
     }
     async function sendDiceMsg(chatId, emoji) {
         if (typeof bot.sendDice === 'function') return bot.sendDice(chatId, { emoji });
@@ -186,12 +203,12 @@ module.exports = function initGroupGames(deps) {
             const g = GAMES[id];
             const max = Math.max(...g.outcomes.map((x) => outcomeMult(g, x, 1)));
             const maxAll = max ** throwsMax(g);
-            return { text: `${g.emoji} (до x${fmtMult(maxAll)})`, callback_data: cb(o, 'G', id, 1) };
+            return { text: `${g.emoji} ${g.title} · до ×${fmtMult(maxAll)}`, callback_data: cb(o, 'G', id, 1) };
         });
-        rows.push(btns.slice(0, 3), btns.slice(3, 6));
+        rows.push(btns.slice(0, 2), btns.slice(2, 4), btns.slice(4, 6));
         rows.push([{ text: '🎭 Авторские', callback_data: cb(o, 'A') }]);
         return {
-            text: `${mention(user)}, 🎮 Выберите игру, на которую хотите сделать ставку!\n\n${footer(user.id)}`,
+            text: `${mention(user)}, 🎮 <b>Выберите игру</b>\n<i>Сначала игру, потом исход. Кнопки работают только у вас.</i>\n\n${footer(user.id)}`,
             markup: { inline_keyboard: rows },
         };
     }
@@ -211,27 +228,31 @@ module.exports = function initGroupGames(deps) {
         for (const line of g.layout) {
             rows.push(line.map((k) => {
                 const oc = byKey[k];
-                return { text: `${oc.t} (x${fmtMult(outcomeMult(g, oc, n))})`, callback_data: cb(o, 'P', gid, n, k) };
+                return { text: `${oc.t} ×${fmtMult(outcomeMult(g, oc, n))}`, callback_data: cb(o, 'P', gid, n, k) };
             }));
         }
         for (const gt of g.gated || []) rows.push([{ text: gt.t, callback_data: cb(o, 'X', gid) }]);
         rows.push([{ text: '< Назад', callback_data: cb(o, 'M') }]);
         return {
-            text: `${mention(user)}, ${g.emoji} Выберите исход игры, на который хотите сделать ставку!\n\n${footer(user.id)}`,
+            text: `${mention(user)}, ${g.emoji} <b>${esc(g.title)}</b> — выберите исход\n` +
+                `<i>${g.emoji === '🎰' ? 'Три барабана, символы: BAR, 🍇, 🍋, 7️⃣' : `Выпадает значение от 1 до ${g.values}`}.` +
+                `${n > 1 ? ` Бросков: ${n} — нужно угадать в каждом, множители перемножаются.` : ''}</i>\n\n${footer(user.id)}`,
             markup: { inline_keyboard: rows },
         };
     }
     function authorMenu(o, user) {
-        const btn = (a) => ({ text: `${a.e} x${a.n}`, callback_data: cb(o, 'Q', a.id) });
+        const btn = (a) => ({ text: `${a.e} ×${a.n}`, callback_data: cb(o, 'Q', a.id) });
         return {
-            text: `${mention(user)}, 🎮 Выберите авторскую игру!\n\n${footer(user.id)}`,
+            text: `${mention(user)}, 🎭 <b>Авторские игры</b>\n<blockquote>${AUTHOR.map((a) => `${a.e} ${a.t} — шанс 1 из ${a.n} → ×${a.n}`).join('\n')}</blockquote>` +
+                `<i>Бот загадывает число от 1 до N. Выигрыш, только если выпало именно N.</i>\n\n${footer(user.id)}`,
             markup: { inline_keyboard: [AUTHOR.slice(0, 4).map(btn), AUTHOR.slice(4).map(btn), [{ text: '< Назад', callback_data: cb(o, 'M') }]] },
         };
     }
     function rakeMenu(o, user) {
         const avail = Math.floor(rec(user.id).rake);
         return {
-            text: `💸 <b>Рейкбек</b> — бонус, который моментально возвращает часть ставки игроку.\n\n💸 Доступно: ${fmtShort(avail)} ${CFG.CUR}`,
+            text: `💸 <b>Рейкбек</b>\n<i>Бонус, который моментально возвращает часть ставки игроку.</i>\n\n` +
+                `<blockquote>📊 Оборот: <b>${coin(rec(user.id).turnover)}</b>\n🎁 Доступно: <b>${coin(avail)}</b>\n♻️ Возврат: ${ub((CFG.RAKE_RATE * 100).toFixed(1))}% от ставок</blockquote>`,
             markup: { inline_keyboard: [[{ text: `📥 Забрать ${fmtShort(avail)}${CFG.CUR}`, callback_data: cb(o, 'C') }], [{ text: '< Назад', callback_data: cb(o, 'M') }]] },
         };
     }
@@ -265,20 +286,25 @@ module.exports = function initGroupGames(deps) {
     }
     const BET_ERR = {
         open_app: '⚠️ Сначала откройте Crown Casino один раз — я не знаю ваш баланс.',
-        empty: '💰 Баланс пуст — ва-банк невозможен.',
-        bad: '⚠️ Укажите сумму: <code>ставка 100</code>, <code>ставка 1.5k</code> или <code>ставка вб</code>',
+        empty: '👛 Баланс пуст — ва-банк невозможен.',
+        bad: '⚠️ <b>Укажите сумму</b>\nПримеры: <code>ставка 100</code> · <code>ставка 1.5k</code> · <code>ставка вб</code> (всё)',
         min: `⚠️ Минимальная ставка — ${CFG.MIN_BET}.`,
     };
 
     // ---- расчёт и отправка результата ----
-    function settleAndText({ user, stake, win, mult, lines, emoji }) {
+    // Расчёт ставки и текст результата. `body` — готовый HTML-блок с подробностями (броски/число).
+    function settleAndText({ user, stake, win, mult, body }) {
         const r = rec(user.id);
         let payout = 0;
         if (win) { payout = payoutFor(stake, mult); if (payout > 0) queueWallet(user.id, { credit: payout }); }
         r.turnover += stake; r.rake += stake * CFG.RAKE_RATE; saveSoon();
-        const head = win ? `⏫ Выигрывает ${fmtShort(payout)} ${CFG.CUR}` : `⏬ Проигрывает ${fmtShort(stake)} ${CFG.CUR}`;
+        try { if (deps.onGroupGame) deps.onGroupGame(user.id, { stake, win, payout, mult }); } catch (e) { /* статистика не должна ломать игру */ }
         const mark = win ? '✅' : '❌';
-        return `${mention(user)}, ${head}\nСтавка ${fmtShort(stake)} ${CFG.CUR}${mark}${fmtMult(mult)}\n${lines}\n\n${footer(user.id)}`;
+        const head = win ? `✅ <b>ПОБЕДА</b> — ${mention(user)}` : `❌ <b>ПРОИГРЫШ</b> — ${mention(user)}`;
+        const money = win
+            ? `🏆 Выплата: <b>+${coin(payout)}</b> <i>(чистыми ${coin(Math.max(0, payout - stake))})</i>`
+            : `💔 Потеря: <b>−${coin(stake)}</b>`;
+        return `${head}\n<blockquote>${body}</blockquote>\n${money}\n🎟 Ставка ${coin(stake)} ${mark} ${xm(mult)}\n\n${footer(user.id, true)}`;
     }
     // Проверка и резерв ставки. Возвращает {stake} или {err}
     function reserve(user) {
@@ -304,8 +330,10 @@ module.exports = function initGroupGames(deps) {
             await safe(bot.answerCallbackQuery(q.id));
             await safe(bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: q.message.message_id }));
             const mult = outcomeMult(g, oc, n);
-            const thr = n > 1 ? ` · ${n} броска (x${fmtMult(mult)})` : '';
-            await bot.sendMessage(chatId, `<b>${nameOf(user)}</b> ставит ${fmtShort(stake)}${CFG.CUR}\n${g.emoji} ${esc(oc.t)}${thr}`, { parse_mode: 'HTML' });
+            const thr = n > 1 ? ` · ${n} броска` : '';
+            await bot.sendMessage(chatId,
+                `🎮 <b>${nameOf(user)}</b> ставит <b>${coin(stake)}</b>\n${g.emoji} <b>${esc(oc.t)}</b>${thr}\n` +
+                `<i>Множитель ${xm(mult)} · возможная выплата ${coin(payoutFor(stake, mult))}</i>`, { parse_mode: 'HTML' });
             const values = [];
             for (let i = 0; i < n; i++) {
                 const m = await sendDiceMsg(chatId, g.emoji);
@@ -315,14 +343,14 @@ module.exports = function initGroupGames(deps) {
                 await sleep((CFG.ANIM_MS[g.emoji] || 3500) * delayScale);
             }
             const win = values.every((v) => oc.set.includes(v));
-            const lines = win
-                ? `Победа, выпало: ${values.join(', ')}`
-                : `Выпало: ${values.join(', ')}, а надо было: ${esc(oc.t)}${n > 1 ? ' в каждом броске' : ''}`;
+            const throwLines = values.map((v, i) => `${g.emoji} ${n > 1 ? `Бросок ${i + 1}` : 'Бросок'}: выпало <b>${v}</b> ${oc.set.includes(v) ? '✅' : '❌'}`).join('\n');
+            const body = `${g.emoji} <b>${esc(g.title)}</b> · ${esc(oc.t)}${thr}\n${throwLines}\n` +
+                `🎯 Нужно${n > 1 ? ' в каждом броске' : ''}: <b>${esc(needText(g, oc))}</b>`;
             settled = true;
-            await bot.sendMessage(chatId, settleAndText({ user, stake, win, mult, lines, emoji: g.emoji }), { parse_mode: 'HTML' });
+            await bot.sendMessage(chatId, settleAndText({ user, stake, win, mult, body }), { parse_mode: 'HTML' });
         } catch (e) {
             console.error('groupgames playDice:', e && e.message);
-            if (!settled) { queueWallet(user.id, { credit: stake }); safe(bot.sendMessage(chatId, `⚠️ ${nameOf(user)}, не удалось провести игру — ставка возвращена.`, { parse_mode: 'HTML' })); }
+            if (!settled) { queueWallet(user.id, { credit: stake }); safe(bot.sendMessage(chatId, `⚠️ <b>${nameOf(user)}</b>, игра не состоялась — ставка возвращена 🪙`, { parse_mode: 'HTML' })); }
         } finally { busy.delete(String(user.id)); }
     }
 
@@ -338,17 +366,19 @@ module.exports = function initGroupGames(deps) {
         try {
             await safe(bot.answerCallbackQuery(q.id));
             await safe(bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: q.message.message_id }));
-            await bot.sendMessage(chatId, `<b>${nameOf(user)}</b> ставит ${fmtShort(stake)}${CFG.CUR}\n${a.e} ${a.t}`, { parse_mode: 'HTML' });
+            await bot.sendMessage(chatId,
+                `🎮 <b>${nameOf(user)}</b> ставит <b>${coin(stake)}</b>\n${a.e} <b>${a.t}</b> · шанс 1 из ${a.n}\n` +
+                `<i>Множитель ${xm(a.n)} · возможная выплата ${coin(payoutFor(stake, a.n))}</i>`, { parse_mode: 'HTML' });
             await bot.sendMessage(chatId, a.e);
             await sleep(1200 * delayScale);
             const rolled = crypto.randomInt(1, a.n + 1);
             const win = rolled === a.n;
-            const lines = win ? `Победа, выпало число ${rolled}` : `Выпало число ${rolled}, а надо было ${a.n}`;
+            const body = `${a.e} <b>${a.t}</b> · шанс 1 из ${a.n}\nВыпало число <b>${rolled}</b> ${win ? '✅' : '❌'}\n🎯 Нужно: <b>${a.n}</b>`;
             settled = true;
-            await bot.sendMessage(chatId, settleAndText({ user, stake, win, mult: a.n, lines, emoji: a.e }), { parse_mode: 'HTML' });
+            await bot.sendMessage(chatId, settleAndText({ user, stake, win, mult: a.n, body }), { parse_mode: 'HTML' });
         } catch (e) {
             console.error('groupgames playAuthor:', e && e.message);
-            if (!settled) { queueWallet(user.id, { credit: stake }); safe(bot.sendMessage(chatId, `⚠️ ${nameOf(user)}, не удалось провести игру — ставка возвращена.`, { parse_mode: 'HTML' })); }
+            if (!settled) { queueWallet(user.id, { credit: stake }); safe(bot.sendMessage(chatId, `⚠️ <b>${nameOf(user)}</b>, игра не состоялась — ставка возвращена 🪙`, { parse_mode: 'HTML' })); }
         } finally { busy.delete(String(user.id)); }
     }
 
@@ -375,7 +405,7 @@ module.exports = function initGroupGames(deps) {
             rememberUser(msg.from);
 
             if (!isGroup) {
-                if (text.startsWith('/')) await safe(bot.sendMessage(msg.chat.id, '🎮 Игры в этом режиме работают только в групповых чатах. Добавьте бота в группу и напишите там <code>ставка 100</code>.', { parse_mode: 'HTML' }));
+                if (text.startsWith('/')) await safe(bot.sendMessage(msg.chat.id, '🎮 <b>Игры работают только в группах</b>\nДобавьте бота в группу и напишите там: <code>ставка 100</code>', { parse_mode: 'HTML' }));
                 return;
             }
             const user = msg.from, chatId = msg.chat.id, o = String(user.id);
@@ -440,7 +470,12 @@ module.exports = function initGroupGames(deps) {
         } catch (e) { console.error('groupgames callback:', e && e.message); }
     });
 
-    return { GAMES, AUTHOR, CFG, fmtShort, fmtMult };
+    // Перечитать данные с диска (после восстановления БД командой /db)
+    function reload() {
+        if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        try { db = JSON.parse(fs.readFileSync(deps.dataFile || DATA_FILE, 'utf8')); } catch (e) { db = {}; }
+    }
+    return { GAMES, AUTHOR, CFG, fmtShort, fmtMult, reload };
 };
 module.exports.fmtShort = fmtShort;
 module.exports.fmtMult = fmtMult;
