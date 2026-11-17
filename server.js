@@ -618,6 +618,7 @@ function touchUser(u) {
 // Всё состояние банка живёт на сервере (bank.json). Зиксы по-прежнему лежат у клиента,
 // поэтому каждая операция возвращает coinsDelta — на сколько клиент должен изменить баланс.
 // Сервер при этом сразу корректирует «известный» баланс игрока.
+let loanMailApi = null;   // заполняется ниже, когда создан бот
 const BANK_FILE = path.join(__dirname, 'bank.json');
 const BANK_CFG = {
     depositDailyRate: 0.02,        // 2% в сутки на вклад
@@ -779,6 +780,7 @@ function handleBankRoutes(req, res) {
             r.loan = { principal: amount, owed: Math.ceil(amount * (1 + BANK_CFG.loanRate)), takenAt: now, dueAt: now + BANK_CFG.loanTermMs, overdue: false };
             saveBank();
             adjustKnownBalance(uid, amount);
+            if (loanMailApi) loanMailApi.sendIssued(uid);   // письмо-картинка от CrownCasino.com в личку бота
             sendJson(res, 200, Object.assign(bankSnapshot(uid, isAdminId(uid)), { coinsDelta: amount }));
         });
         return true;
@@ -1082,6 +1084,8 @@ function resetAllCaches() {
     if (groupGamesApi) groupGamesApi.reload();
 }
 require('./dbbackup')({ bot, isAdminId, https, files: DB_FILES, dir: __dirname, resetCaches: resetAllCaches });
+// Письма о кредите (loanmail.js): выдача и напоминание за сутки до срока + админ-команда /loanletter для проверки
+loanMailApi = require('./loanmail')({ bot, isAdminId, loadBank, saveBank, loadUsers, getUserLanguage, cfg: BANK_CFG, dayMs: DAY_MS });
 
 // ====== Звуки: mp3/ogg/wav/m4a/webm лежат рядом с server.js (или в папке sounds/, если она есть). Имена: <игра>_<событие>[_N].ext — см. SOUNDS_README.txt ======
 const SOUNDS_DIR = fs.existsSync(path.join(__dirname, 'sounds')) ? path.join(__dirname, 'sounds') : __dirname;
@@ -1525,6 +1529,7 @@ server.listen(PORT, async () => {
     }
     runLeaderboardCycleIfDue(); // на случай, если сервер долго не запускался
     setInterval(runLeaderboardCycleIfDue, 60 * 60 * 1000); // проверка раз в час
+    if (loanMailApi) loanMailApi.start();   // напоминания о кредите за сутки до срока
     tickCryptoGameIfDue();
     setInterval(tickCryptoGameIfDue, 1000); // проверка раз в секунду (тик курса — раз в 2 секунды)
     keepAliveLoop();
