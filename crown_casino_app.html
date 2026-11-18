@@ -2383,6 +2383,7 @@ const DEFAULT_STATE = {
 
 let state = loadState();
 saveState(); // сразу фиксируем состояние (включая приветственный премиум для новых игроков)
+actStartCheck();
 
 function loadState(){
   try{
@@ -2403,7 +2404,57 @@ function loadState(){
   }catch(e){ return structuredCloneSafe(DEFAULT_STATE); }
 }
 function structuredCloneSafe(o){ return JSON.parse(JSON.stringify(o)); }
-function saveState(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); reportBalanceSoon(); }
+
+// ===== Журнал действий (для разбора крупных скачков баланса) =====
+// Хранит последние 200 событий: начисления/траты с указанием, КАКАЯ функция вызвала, промокоды, админ-панель,
+// запросы в банк. Лежит в localStorage и уходит на сервер вместе с балансом. Только var/function — вызывается до инициализации.
+var _actLog, _lastCoins, _legit;
+function actLogArr(){
+  if(!_actLog){
+    try{ _actLog = JSON.parse(localStorage.getItem('cc_actlog_v1') || '[]'); if(!Array.isArray(_actLog)) _actLog = []; }
+    catch(e){ _actLog = []; }
+  }
+  return _actLog;
+}
+function actLog(k, o){
+  try{
+    const a = actLogArr(), e = { t: Date.now(), k: k };
+    if(o){ for(const x in o){ const v = o[x]; e[x] = (typeof v === 'string') ? v.slice(0, 80) : v; } }
+    a.push(e);
+    if(a.length > 200) a.splice(0, a.length - 200);
+    localStorage.setItem('cc_actlog_v1', JSON.stringify(a));
+  }catch(e){}
+}
+function actCaller(){   // имена трёх функций, из которых вызвали (без ссылок на файлы)
+  try{
+    return (new Error().stack || '').split('\n').slice(3, 6).map(function(l){
+      var m = l.match(/at\s+(?:async\s+)?([^\s(]+)\s*\(/) || l.match(/^\s*([^@\s]+)@/);
+      return m ? m[1] : '?';
+    }).join('<');
+  }catch(e){ return '?'; }
+}
+function actLogTail(){  // последние записи для отправки (не больше ~30 КБ)
+  var a = actLogArr().slice(-120), txt = JSON.stringify(a);
+  while(txt.length > 30000 && a.length > 10){ a.splice(0, 10); txt = JSON.stringify(a); }
+  return a;
+}
+function actStartCheck(){
+  try{
+    var a = actLogArr(), lastB = null;
+    for(var i = a.length - 1; i >= 0; i--){ if(typeof a[i].b === 'number'){ lastB = a[i].b; break; } }
+    if(lastB !== null && lastB !== state.coins) actLog('TAMPER_START', { last: lastB, now: state.coins });
+    var u = (typeof tg !== 'undefined' && tg) ? tg : null;
+    actLog('start', { b: state.coins, bz: !!state.basarabActivated, mb: !!state.megaBonusActive, ac: Object.keys(state.adminCodes || {}).length,
+      up: (state.usedPromoCodes || []).length, gu: state.adminGuessUses || 0, pl: u ? (u.platform || '') : '', v: u ? (u.version || '') : '',
+      ua: (navigator.userAgent || '').slice(0, 70) });
+  }catch(e){}
+}
+function saveState(){
+  // баланс изменился, а ни одна из «законных» функций (addCoins/spendCoins/банк/переводы) этого не делала — это правка в обход игры
+  if(_lastCoins !== undefined && state.coins !== _lastCoins && !_legit) actLog('TAMPER', { from: _lastCoins, to: state.coins, f: actCaller() });
+  _legit = false; _lastCoins = state.coins;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); reportBalanceSoon();
+}
 // Сообщаем серверу баланс (с задержкой), чтобы он мог проверять переводы send/receive
 var _balTimer = null; // var, а не let: saveState вызывается при старте раньше этой строки
 function reportBalanceSoon(){
@@ -2412,7 +2463,7 @@ function reportBalanceSoon(){
   _balTimer = setTimeout(()=>{
     fetch('/api/report-balance', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ initData: tg.initData, coins: state.coins })
+      body: JSON.stringify({ initData: tg.initData, coins: state.coins, log: actLogTail() })
     }).catch(()=>{});
   }, 1200);
 }
@@ -2661,6 +2712,7 @@ function addCoins(n){
   if(!isFinite(n)) return;                       // NaN/Infinity никогда не попадают в баланс
   const next = safeNum(state.coins, 0) + n;
   state.coins = isFinite(next) ? Math.min(COIN_CAP, Math.max(0, next)) : safeNum(state.coins, 0);
+  _legit = true; actLog('add', { n: n, b: state.coins, f: actCaller() });
   saveState();
   refreshTopBar();
 }
@@ -2674,6 +2726,7 @@ function spendCoins(n){
   if(spendableCoins() < n){ toast(tr('bank_funds_frozen')); return false; }
   state.coins -= n;
   if(n > 0) profBump('bets');
+  _legit = true; actLog('spend', { n: n, b: state.coins, f: actCaller() });
   saveState();
   refreshTopBar();
   return true;
@@ -2755,6 +2808,7 @@ $('#resetBtn').addEventListener('click', ()=>{
   const keepGfx = state.graphics, keepSound = state.sound;
   state = structuredCloneSafe(DEFAULT_STATE);
   state.graphics = keepGfx; state.sound = keepSound;
+  _legit = true; actLog('reset', { b: state.coins });
   saveState();
   renderAll();
   toast(tr('progress_reset_done'));
@@ -2803,6 +2857,7 @@ function tryApplyPromo(codeRaw){
   const code = (codeRaw||'').trim().toUpperCase();
   const msgEl = $('#promoMsg');
   if(!code){ msgEl.textContent=''; return; }
+  actLog('promo', { c: code });
 
   if(code === 'FREE'){
     if(state.usedPromoCodes.includes('FREE')){
@@ -2836,18 +2891,7 @@ function tryApplyPromo(codeRaw){
     return;
   }
 
-  // Секретный код для админа: безлимитные активации (для личного использования
-  // на разных аккаунтах/устройствах). Как и раньше, при вводе не показываем
-  // никакого намёка на "уже активирован" — обычный вид активации без палева.
-  if(code === 'BASARAB1'){
-    state.basarabActivated = true;
-    state.megaBonusActive = true; // ежечасный бонус 500000 зиксов вместо обычного
-    addCoins(1e36); // + число с 36 нулями зиксов при каждой активации
-    saveState();
-    refreshBonusUI();
-    showPromoMsg(tr('code_activated_bang'), true);
-    return;
-  }
+  // Код BASARAB1 отключён: теперь он попадает в общую ветку «такого кода нет».
 
   // "Угадываемый" код-ловушка: многие пользователи пробуют ADMIN на удачу.
   // Здесь он реально работает, но с жёстким лимитом в 3 активации (на устройство),
@@ -2888,6 +2932,7 @@ $('#applyPromoBtn').addEventListener('click', ()=>{
   function startPress(){
     pressTimer = setTimeout(()=>{
       $('#adminPanel').style.display = 'block';
+      actLog('admin_panel_open');
       toast(tr('admin_unlocked'));
     }, 2000);
   }
@@ -2908,6 +2953,7 @@ $('#adminGenBtn').addEventListener('click', ()=>{
     return;
   }
   const code = randomCode(8);
+  actLog('admin_gen', { code: code, amount: amount, act: activations });
   state.adminCodes[code] = { amount, activationsLeft: activations };
   saveState();
   $('#adminCodeVal').textContent = code;
@@ -4860,9 +4906,10 @@ async function claimPendingReward(){
       addCoins(data.walletCredit);
       toast(tr('transfer_received', fmtCrowns(data.walletCredit)));
     }
-    if(data.ok && data.walletZero){ state.coins = 0; saveState(); refreshTopBar(); }
+    if(data.ok && data.walletZero){ state.coins = 0; _legit = true; actLog('wallet_zero', { b: 0 }); saveState(); refreshTopBar(); }
     if(data.ok && data.walletDebit > 0){
       state.coins = Math.max(0, state.coins - data.walletDebit);
+      _legit = true; actLog('wallet_debit', { n: data.walletDebit, b: state.coins });
       saveState(); refreshTopBar();
     }
   }catch(e){}
@@ -4912,7 +4959,7 @@ async function checkIncomingTransfer(){
             addCoins(res.amount);
             toast(tr('transfer_received', fmtCrowns(res.amount)));
           } else {
-            if(!res.free){ state.coins = Math.max(0, state.coins - res.amount); }
+            if(!res.free){ state.coins = Math.max(0, state.coins - res.amount); _legit = true; actLog('wallet_pay', { n: res.amount, b: state.coins }); }
             saveState(); refreshTopBar();
             toast(tr('request_paid', fmtCrowns(res.amount)));
           }
@@ -5078,18 +5125,20 @@ async function bankPost(path, body){
   try{
     const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(Object.assign({ initData: tg.initData }, body || {})) });
     const d = await r.json().catch(()=>({ ok:false }));
+    actLog('api', { p: String(path).slice(0, 40), ok: !!(d && d.ok), r: (d && d.reason) || '' });
     if(d && d.frozen && !d.ok){ showFrozenOverlay(); }
     return d;
   }catch(e){ return { ok:false, reason:'net' }; }
 }
 async function reportBalanceNow(){
   if(!bkInTg()) return;
-  try{ await fetch('/api/report-balance', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ initData: tg.initData, coins: state.coins }) }); }catch(e){}
+  try{ await fetch('/api/report-balance', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ initData: tg.initData, coins: state.coins, log: actLogTail() }) }); }catch(e){}
 }
 function showFrozenOverlay(){ $('#frozenOverlay').classList.add('show'); }
 function applyBankDelta(d){
   d = Number(d); if(!isFinite(d)) return;
   state.coins = Math.min(COIN_CAP, Math.max(0, safeNum(state.coins, 0) + d));
+  _legit = true; actLog('bank', { n: d, b: state.coins });
   saveState(); refreshTopBar();
 }
 function applyFrozen(d){
@@ -5395,6 +5444,7 @@ function profBump(kind){
   try{
     if(!state.pstat) state.pstat = { bets: 0, wins: 0 };
     state.pstat[kind] = (state.pstat[kind] || 0) + 1;
+    if(kind === 'wins') actLog('win');
     if(!tg || !tg.initData) return;
     clearTimeout(_profSnapTimer);
     _profSnapTimer = setTimeout(()=>{ profPost('/api/profile-report', { bets: state.pstat.bets, wins: state.pstat.wins }).catch(()=>{}); }, 20000);

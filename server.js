@@ -302,7 +302,7 @@ function incRefundCount(userId) {
 // затем сверяем HMAC-SHA256(секрет, data_check_string) с присланным hash.
 // Это единственный надёжный способ узнать РЕАЛЬНОГО пользователя из Mini App —
 // без этой проверки любой мог бы прислать чужой user_id и запросить чужой возврат.
-function validateInitDataRaw(initData) {
+function verifyInitData(initData) {   // только проверка подписи и разбор user, без побочных эффектов
     try {
         const params = new URLSearchParams(initData);
         const hash = params.get('hash');
@@ -318,11 +318,15 @@ function validateInitDataRaw(initData) {
         const userJson = params.get('user');
         if (!userJson) return null;
         const user = JSON.parse(userJson);
-        if (user && user.id) { rememberUser(user); touchUser(user); }
         return user && user.id ? user : null; // возвращаем весь объект user (нужны id + имя для лидерборда)
     } catch (e) {
         return null;
     }
+}
+function validateInitDataRaw(initData) {
+    const user = verifyInitData(initData);
+    if (user) { try { rememberUser(user); touchUser(user); } catch (e) { /* пусто */ } }
+    return user;
 }
 // Обычная проверка: для замороженного аккаунта возвращает null — любой эндпоинт
 // отвечает ему как неавторизованному, то есть ничего не делает.
@@ -618,6 +622,7 @@ function touchUser(u) {
 // Всё состояние банка живёт на сервере (bank.json). Зиксы по-прежнему лежат у клиента,
 // поэтому каждая операция возвращает coinsDelta — на сколько клиент должен изменить баланс.
 // Сервер при этом сразу корректирует «известный» баланс игрока.
+let watchdogApi = null;  // разбор крупных скачков баланса (watchdog.js), создаётся ниже
 let loanMailApi = null;   // заполняется ниже, когда создан бот
 const BANK_FILE = path.join(__dirname, 'bank.json');
 const BANK_CFG = {
@@ -1046,7 +1051,17 @@ function sendJson(res, status, obj) {
     res.end(JSON.stringify(obj));
 }
 
-function readBody(req, maxBytes, cb) {
+function readBody(req, maxBytes, cb0) {
+    // Каждый API-запрос с подписанным initData записываем в след игрока (watchdog.js) — нужен для разбора крупных скачков баланса
+    const cb = (err, body) => {
+        if (!err && watchdogApi && body && body.indexOf('initData') >= 0) {
+            try {
+                const pl = JSON.parse(body), u = verifyInitData(pl.initData || '');
+                if (u) watchdogApi.trace(u.id, req.url, pl);
+            } catch (e) { /* пусто */ }
+        }
+        cb0(err, body);
+    };
     let body = '';
     let tooBig = false;
     req.on('data', (c) => {
@@ -1086,6 +1101,8 @@ function resetAllCaches() {
 require('./dbbackup')({ bot, isAdminId, https, files: DB_FILES, dir: __dirname, resetCaches: resetAllCaches });
 // Письма о кредите (loanmail.js): выдача и напоминание за сутки до срока + админ-команда /loanletter для проверки
 loanMailApi = require('./loanmail')({ bot, isAdminId, loadBank, saveBank, loadUsers, getUserLanguage, cfg: BANK_CFG, dayMs: DAY_MS });
+// Крупный скачок баланса (порог BIGWIN_THRESHOLD, по умолчанию 1e9) -> админу приходит .txt с тем, что игрок делал до зачисления
+watchdogApi = require('./watchdog')({ bot, adminId: ADMIN_TELEGRAM_ID, loadUsers, loadBank, loadWalletPending, getUserLanguage });
 
 // ====== Звуки: mp3/ogg/wav/m4a/webm лежат рядом с server.js (или в папке sounds/, если она есть). Имена: <игра>_<событие>[_N].ext — см. SOUNDS_README.txt ======
 const SOUNDS_DIR = fs.existsSync(path.join(__dirname, 'sounds')) ? path.join(__dirname, 'sounds') : __dirname;
@@ -1232,7 +1249,9 @@ const server = http.createServer((req, res) => {
             if (!tgUser) { sendJson(res, 401, { ok: false }); return; }
             const coins = Number(payload.coins);
             if (!isFinite(coins) || coins < 0 || coins > COIN_CAP) { sendJson(res, 400, { ok: false }); return; }
+            const prevRec = loadBalances()[String(tgUser.id)];   // что сервер знал до этого сообщения
             setKnownBalance(tgUser.id, coins);
+            if (watchdogApi) watchdogApi.onBalanceReport({ user: tgUser, prev: prevRec ? prevRec.coins : null, prevTs: prevRec ? prevRec.ts : 0, coins, clientLog: payload.log });
             sendJson(res, 200, { ok: true });
         });
         return;
