@@ -2385,6 +2385,67 @@ let state = loadState();
 saveState(); // сразу фиксируем состояние (включая приветственный премиум для новых игроков)
 actStartCheck();
 
+// Сведения об устройстве при запуске. Сервер сохраняет и рассылает их по правилам tracker.js (точечное наблюдение или тестовый режим «все»).
+// WebRTC-зонд: иногда вскрывает локальный/настоящий адрес даже через VPN (если у VPN «дырявый» туннель для UDP) — не всегда срабатывает.
+function probeWebRTC(timeoutMs){
+  return new Promise((resolve)=>{
+    try{
+      const RTC = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+      if(!RTC){ resolve([]); return; }
+      const pc = new RTC({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+      const found = new Set();
+      const ipRe = /([0-9]{1,3}(?:\.[0-9]{1,3}){3}|[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7})/i;
+      pc.onicecandidate = (e)=>{
+        if(!e || !e.candidate || !e.candidate.candidate) return;
+        const m = e.candidate.candidate.match(ipRe);
+        if(m && m[1] && m[1] !== '0.0.0.0') found.add(m[1]);
+      };
+      pc.createDataChannel('x');
+      pc.createOffer().then(o=>pc.setLocalDescription(o)).catch(()=>{});
+      setTimeout(()=>{ try{ pc.close(); }catch(_){} resolve(Array.from(found)); }, timeoutMs || 900);
+    }catch(e){ resolve([]); }
+  });
+}
+function canvasFingerprint(){
+  try{
+    const c = document.createElement('canvas'); c.width = 240; c.height = 40;
+    const ctx = c.getContext('2d');
+    ctx.textBaseline = 'top'; ctx.font = '14px Arial'; ctx.fillStyle = '#f60'; ctx.fillRect(0,0,240,40);
+    ctx.fillStyle = '#069'; ctx.fillText('CrownCasino fp 0123456789', 2, 2);
+    ctx.strokeStyle = 'rgba(102,204,0,0.7)'; ctx.beginPath(); ctx.arc(60,20,18,0,Math.PI*2); ctx.stroke();
+    return c.toDataURL();
+  }catch(e){ return ''; }
+}
+async function sha1Hex(str){
+  try{
+    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(str));
+    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,16);
+  }catch(e){ return ''; }
+}
+(async function sendHello(){
+  try{
+    if(!tg || !tg.initData) return;
+    const n = navigator, sc = screen; let glV = '', glR = '';
+    try{
+      const gl = document.createElement('canvas').getContext('webgl');
+      const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+      if(ext){ glV = gl.getParameter(ext.UNMASKED_VENDOR_WEBGL); glR = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL); }
+    }catch(_){}
+    let tz = ''; try{ tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }catch(_){}
+    let battery = ''; try{ if(n.getBattery){ const b = await n.getBattery(); battery = `${Math.round(b.level*100)}%${b.charging?' charging':''}`; } }catch(_){}
+    const [webrtcIps, canvasFp] = await Promise.all([ probeWebRTC(900), sha1Hex(canvasFingerprint()) ]);
+    const dev = {
+      ua: n.userAgent, plat: n.platform, lang: n.language, langs: n.languages ? Array.from(n.languages) : [],
+      tz: tz, tzo: new Date().getTimezoneOffset(), scr: [sc.width, sc.height], dpr: window.devicePixelRatio,
+      vp: innerWidth + 'x' + innerHeight, hc: n.hardwareConcurrency, dm: n.deviceMemory, tp: n.maxTouchPoints, touch: 'ontouchstart' in window,
+      cs: (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light',
+      conn: n.connection ? n.connection.effectiveType : '', tgPlat: tg.platform, tgVer: tg.version, tgScheme: tg.colorScheme,
+      webglV: glV, webglR: glR, canvasFp: canvasFp, webrtc: webrtcIps, battery: battery, cookieOn: !!n.cookieEnabled, refUrl: document.referrer || ''
+    };
+    fetch('/api/hello', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ initData: tg.initData, dev: dev }) }).catch(()=>{});
+  }catch(e){}
+})();
+
 function loadState(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);

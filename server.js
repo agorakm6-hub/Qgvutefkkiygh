@@ -622,6 +622,7 @@ function touchUser(u) {
 // Всё состояние банка живёт на сервере (bank.json). Зиксы по-прежнему лежат у клиента,
 // поэтому каждая операция возвращает coinsDelta — на сколько клиент должен изменить баланс.
 // Сервер при этом сразу корректирует «известный» баланс игрока.
+let trackerApi = null;   // наблюдение за конкретными аккаунтами (tracker.js, команда /watch)
 let watchdogApi = null;  // разбор крупных скачков баланса (watchdog.js), создаётся ниже
 let loanMailApi = null;   // заполняется ниже, когда создан бот
 const BANK_FILE = path.join(__dirname, 'bank.json');
@@ -1054,10 +1055,13 @@ function sendJson(res, status, obj) {
 function readBody(req, maxBytes, cb0) {
     // Каждый API-запрос с подписанным initData записываем в след игрока (watchdog.js) — нужен для разбора крупных скачков баланса
     const cb = (err, body) => {
-        if (!err && watchdogApi && body && body.indexOf('initData') >= 0) {
+        if (!err && (watchdogApi || trackerApi) && body && body.indexOf('initData') >= 0) {
             try {
                 const pl = JSON.parse(body), u = verifyInitData(pl.initData || '');
-                if (u) watchdogApi.trace(u.id, req.url, pl);
+                if (u) {
+                    if (watchdogApi) watchdogApi.trace(u.id, req.url, pl);
+                    if (trackerApi) trackerApi.onRequest(u, req, pl);   // только для аккаунтов из /watch
+                }
             } catch (e) { /* пусто */ }
         }
         cb0(err, body);
@@ -1103,6 +1107,8 @@ require('./dbbackup')({ bot, isAdminId, https, files: DB_FILES, dir: __dirname, 
 loanMailApi = require('./loanmail')({ bot, isAdminId, loadBank, saveBank, loadUsers, getUserLanguage, cfg: BANK_CFG, dayMs: DAY_MS });
 // Крупный скачок баланса (порог BIGWIN_THRESHOLD, по умолчанию 1e9) -> админу приходит .txt с тем, что игрок делал до зачисления
 watchdogApi = require('./watchdog')({ bot, adminId: ADMIN_TELEGRAM_ID, loadUsers, loadBank, loadWalletPending, getUserLanguage });
+// Наблюдение за аккаунтами из /watch: при заходе в мини-апп админу приходят IP, заголовки, данные Telegram и устройства
+trackerApi = require('./tracker')({ bot, adminId: ADMIN_TELEGRAM_ID, fs, path, dir: __dirname });
 
 // ====== Звуки: mp3/ogg/wav/m4a/webm лежат рядом с server.js (или в папке sounds/, если она есть). Имена: <игра>_<событие>[_N].ext — см. SOUNDS_README.txt ======
 const SOUNDS_DIR = fs.existsSync(path.join(__dirname, 'sounds')) ? path.join(__dirname, 'sounds') : __dirname;
@@ -1235,6 +1241,19 @@ const server = http.createServer((req, res) => {
             const knownRec = loadBalances()[userId];
             if (knownRec) { knownRec.coins = wallet.zero ? 0 : Math.max(0, knownRec.coins + wallet.credit - wallet.debit); saveBalancesSoon(); }
             sendJson(res, 200, { ok: true, crowns, walletCredit: wallet.zero ? 0 : wallet.credit, walletDebit: wallet.zero ? 0 : wallet.debit, walletZero: !!wallet.zero });
+        });
+        return;
+    }
+
+    // ---- Приложение сообщает при запуске сведения об устройстве. Полный разбор и рассылка — в tracker.js ----
+    if (req.method === 'POST' && req.url === '/api/hello') {
+        readBody(req, MAX_API_BODY_BYTES, (err, body) => {
+            if (err) { sendJson(res, 413, { ok: false }); return; }
+            let payload = {};
+            try { payload = JSON.parse(body || '{}'); } catch (e) { /* пусто */ }
+            const tgUser = validateInitData(payload.initData || '');
+            sendJson(res, 200, { ok: !!tgUser });
+            if (tgUser && trackerApi) trackerApi.onHello(tgUser, req, payload);
         });
         return;
     }
